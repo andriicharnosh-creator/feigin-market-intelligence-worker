@@ -1,6 +1,7 @@
-name = "feigin-market-intelligence"
+name = "feigin-market-intelligence-worker"
 main = "worker.js"
 compatibility_date = "2024-01-01"
+workers_dev = true
 
 [triggers]
-crons = ["0 6 * * *"]  # 08:00 Warsaw (06:00 UTC)
+crons = ["0 6 * * *"]
