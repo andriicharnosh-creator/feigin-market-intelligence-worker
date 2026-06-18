@@ -1,0 +1,6 @@
+name = "feigin-market-intelligence"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[triggers]
+crons = ["0 6 * * *"]  # 08:00 Warsaw (06:00 UTC)
