@@ -44,12 +44,21 @@ export default {
   },
   async fetch(request, env) {
     if (request.method === 'POST') {
+      if (!isAuthorizedTrigger(request, env)) {
+        return new Response('Unauthorized', { status: 401 });
+      }
       await runMarketIntelligence(env);
-      return new Response('Market Intelligence digest triggered', { status: 200 });
+      return new Response('Market Intelligence analysis triggered; outbound remains pending approval', { status: 202 });
     }
-    return new Response('Feigin Market Intelligence Worker — POST to trigger', { status: 200 });
+    return new Response('Feigin Market Intelligence Worker', { status: 200 });
   }
 };
+
+export function isAuthorizedTrigger(request, env) {
+  const expected = String(env.MI_TRIGGER_TOKEN || '').trim();
+  const actual = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  return Boolean(expected) && actual === expected;
+}
 
 async function runMarketIntelligence(env) {
   const now = new Date();
@@ -75,8 +84,8 @@ async function runMarketIntelligence(env) {
     const allSignals = [...existingSignals, ...savedSignals];
     const emailHtml = generateDigestEmail(allSignals, brief, dateStr, isMonday);
 
-    // 6. Wyślij email
-    await sendEmail(env, {
+    // 6. Utwórz element kolejki approval; bez bezpośredniej wysyłki.
+    await queueEmailApproval(env, {
       to: 'a.charnosh@feiginelectric.com',
       cc: ['g.przewozny@feiginelectric.com'],
       subject: isMonday
@@ -88,8 +97,8 @@ async function runMarketIntelligence(env) {
     console.log(`[MI] Done. New signals: ${savedSignals.length}, Total P1: ${allSignals.filter(s=>s.priority==='P1').length}`);
   } catch (e) {
     console.error('[MI] Error:', e.message);
-    // Wyślij alert o błędzie
-    await sendEmail(env, {
+    // Błędy również trafiają do kolejki; worker nie wysyła autonomicznie.
+    await queueEmailApproval(env, {
       to: 'a.charnosh@feiginelectric.com',
       subject: `⚠️ MI Worker Error — ${dateStr}`,
       html: `<p>Market Intelligence Worker napotkał błąd: ${e.message}</p>`,
@@ -281,18 +290,25 @@ function generateDigestEmail(signals, brief, dateStr, isWeekly) {
 </html>`;
 }
 
-async function sendEmail(env, { to, cc, subject, html }) {
-  if (!env.RESEND_API_KEY) {
-    console.log('[MI] No RESEND_API_KEY — skipping email');
-    return;
-  }
-  const body = { from: 'Feigin MI <mi@feiginelectric.pl>', to: Array.isArray(to) ? to : [to], subject, html };
+export async function queueEmailApproval(env, { to, cc, subject, html }) {
+  const body = {
+    state: 'PENDING_APPROVAL',
+    channel: 'EMAIL',
+    source: 'MARKET_INTELLIGENCE_WORKER',
+    from: 'Feigin MI <mi@feiginelectric.pl>',
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html
+  };
   if (cc?.length) body.cc = cc;
-
-  const r = await fetch('https://api.resend.com/emails', {
+  const r = await fetch(`${MI_API}/outbound-approvals`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.RESEND_API_KEY}` },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(env.MISSION_CONTROL_API_KEY ? { 'Authorization': `Bearer ${env.MISSION_CONTROL_API_KEY}` } : {})
+    },
     body: JSON.stringify(body),
   });
-  console.log('[MI] Email sent:', r.status, subject);
+  if (!r.ok) throw new Error(`approval queue rejected item: ${r.status}`);
+  console.log('[MI] Outbound pending approval:', r.status, subject);
 }
