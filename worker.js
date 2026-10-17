@@ -27,16 +27,42 @@ const SOURCES = [
   { url: 'https://www.linkedin.com/search/results/content/?keywords=wyłączanie%20falownika%20napięcie&datePosted=past-week', name: 'LinkedIn Energy PL', type: 'social' },
 ];
 
+const SIGNAL_TRACKS = ['problem_first', 'technology_first', 'opportunity_first'];
 const SEARCH_QUERIES = [
-  'wyłączanie falownika napięcie sieć Polska',
-  'moc bierna kompensacja kara przemysł',
-  'EMS monitoring energii przetarg',
-  'jakość energii harmoniczne przemysł',
-  'fotowoltaika curtailment ograniczenie',
-  'ECOD optymalizacja napięcia oszczędności',
-  'analizator energii elektrycznej zakup',
-  'rachunek za energię redukcja przemysł',
+  'dlaczego rachunki za energię rosną w zakładzie',
+  'nie wiemy które urządzenia zużywają energię',
+  'awarie maszyn przerwy zasilania przyczyny',
+  'monitoring zużycia energii wielu obiektów',
+  'fotowoltaika niska autokonsumpcja problem',
+  'moc bierna kompensacja opłaty przemysł',
+  'jakość energii harmoniczne zakłócenia',
+  'przetarg monitoring energia audyt modernizacja'
 ];
+
+// Read only: retrieve actual public pages. A model must not invent sources.
+async function retrievePublicSources() {
+  const retrieved = [];
+  for (const source of SOURCES) {
+    try {
+      const url = new URL(source.url);
+      if (url.protocol !== 'https:') continue;
+      const response = await fetch(url.toString(), { headers: { 'Accept': 'text/html,application/rss+xml,application/xml,text/plain' }, redirect: 'follow' });
+      if (!response.ok) continue;
+      const finalUrl = new URL(response.url);
+      if (finalUrl.protocol !== 'https:') continue;
+      const contentType = response.headers.get('content-type') || '';
+      if (!/text\/html|text\/plain|application\/(rss\+xml|xml)|text\/xml/i.test(contentType)) continue;
+      const raw = (await response.text()).slice(0, 120000);
+      const body = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]*>/g, ' ').replace(/&(?:nbsp|amp|lt|gt|quot);/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 9000);
+      if (body.length < 100) continue;
+      retrieved.push({ id: retrieved.length + 1, url: finalUrl.toString(), name: source.name, retrieved_at: new Date().toISOString(), text: body });
+    } catch (error) {
+      console.warn('[MI] Source unavailable:', source.name, String(error?.message || error));
+    }
+  }
+  return retrieved;
+}
+
 
 export default {
   async scheduled(event, env, ctx) {
@@ -108,73 +134,60 @@ async function runMarketIntelligence(env) {
 
 async function scanSourcesWithClaude(env, queries) {
   if (!env.ANTHROPIC_KEY) return [];
-  
-  const signals = [];
-  
-  // Przygotuj zapytanie do Claude z instrukcją skanowania
-  const prompt = `Jesteś Market Intelligence Analysterem dla Feigin Electric — firmy sprzedającej urządzenia ECOD (optymalizatory napięcia) i systemy EMS (monitoring energii).
+  const documents = await retrievePublicSources();
+  if (!documents.length) {
+    console.warn('[MI] No verified retrieved documents; no new signals');
+    return [];
+  }
 
-Twoim zadaniem jest analiza rynku energetycznego w Polsce i identyfikacja sygnałów sprzedażowych.
-
-Produkty Feigin Electric:
-- ECOD: urządzenia redukujące napięcie, poprawiające cosφ → oszczędności 5-15%
-- EMS: analizatory i systemy monitoringu energii elektrycznej
-- Białe certyfikaty: wsparcie procesu uzyskiwania
-
-Docelowi klienci: zakłady przemysłowe, przetwórstwo spożywcze (pieczarkarnie, mleczarnie, fermy), handel wielkopowierzchniowy, chłodnie, drukarnie.
-
-Przeszukaj dostępną wiedzę o aktualnym rynku energetycznym w Polsce (2025-2026) i zidentyfikuj 5-8 konkretnych sygnałów rynkowych.
-
-Dla każdego sygnału zwróć JSON:
-{
-  "title": "krótki tytuł (max 80 znaków)",
-  "summary": "opis sygnału (2-3 zdania)",
-  "source_name": "nazwa źródła",
-  "source_url": "URL lub 'https://feiginelectric.pl' jeśli brak",
-  "classification": "problem_klienta|regulacja|przetarg|konkurencja|marketing|trend",
-  "sector": "sektor klienta np. chłodnie, piekarnie",
-  "technology_angle": "ECOD|EMS|SVG|APF|białe certyfikaty",
-  "evidence_strength": "weak|medium|strong",
-  "confidence": 0-100,
-  "priority": "P1|P2|P3",
-  "is_actionable": true|false,
-  "owner": "CEO|Sales|Scout|Energy Analyst|Marketing",
-  "next_step": "konkretne działanie",
-  "facts": "fakty z sygnału",
-  "commercial_hypothesis": "jak to przekłada się na szansę sprzedażową Feigin"
-}
-
-Zwróć TYLKO tablicę JSON, bez żadnego innego tekstu.`;
+  const prompt = `Jesteś analitykiem FEIGIN AI. Analizuj WYŁĄCZNIE dostarczone, faktycznie pobrane dokumenty.
+Priorytet: pytania i nierozwiązane problemy klienta (problem_first).
+Zachowaj także technology_first i opportunity_first. Zapytania pomocnicze: ${queries.join('; ')}.
+Nie twórz firm, problemów, cytatów ani adresów URL. Nie traktuj samego artykułu branżowego jako potwierdzonego leada.
+Zwróć WYŁĄCZNIE tablicę JSON (może być pusta). Każdy obiekt:
+{"title":"...", "summary":"...", "source_id":1, "evidence_quote":"dosłowny krótki fragment dokumentu",
+"signal_track":"problem_first|technology_first|opportunity_first",
+"classification":"problem_klienta|regulacja|przetarg|konkurencja|marketing|trend",
+"sector":"...", "technology_angle":"EMS|ECOD|SVG|APF|none",
+"priority":"P1|P2|P3", "owner":"Sales", "next_step":"...", "commercial_hypothesis":"..."}
+DOKUMENTY:
+${documents.map(d => JSON.stringify(d)).join('\n')}`;
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': env.ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
+      headers: { 'Content-Type': 'application/json', 'x-api-key': env.ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }),
     });
-
+    if (!response.ok) throw new Error('Model request failed: ' + response.status);
     const data = await response.json();
-    const text = data.content?.[0]?.text || '[]';
-    
-    // Parse JSON
-    const cleanText = text.replace(/```json\n?|\n?```/g, '').trim();
-    const parsed = JSON.parse(cleanText);
-    
-    // Dodaj duplicate_key żeby uniknąć duplikatów
-    return parsed.map(s => ({
-      ...s,
-      duplicate_key: `${s.title.substring(0,50)}-${new Date().toISOString().split('T')[0]}`,
-    }));
-  } catch (e) {
-    console.error('[MI] Claude scan error:', e.message);
+    const raw = String(data.content?.[0]?.text || '[]').replace(/```json\n?|```/g, '').trim();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('Expected JSON array');
+    const accepted = [];
+    for (const item of parsed) {
+      const doc = documents.find(d => d.id === item.source_id);
+      const quote = String(item.evidence_quote || '').trim().replace(/\s+/g, ' ');
+      if (!doc || quote.length < 24 || !doc.text.includes(quote)) continue;
+      if (!SIGNAL_TRACKS.includes(item.signal_track)) continue;
+      const title = String(item.title || '').slice(0, 80);
+      if (!title) continue;
+      accepted.push({
+        title, summary: String(item.summary || '').slice(0, 1000),
+        source_name: doc.name, source_url: doc.url, retrieved_at: doc.retrieved_at,
+        evidence_quote: quote, signal_track: item.signal_track,
+        classification: item.classification || 'trend', sector: item.sector || '',
+        technology_angle: item.technology_angle || 'none', evidence_strength: 'medium',
+        confidence: 60, priority: item.priority || 'P3', is_actionable: false,
+        owner: 'Sales', next_step: 'SALES_REVIEW: sprawdź podmiot, podstawę kontaktu i źródło przed wpisem do CRM',
+        facts: quote, commercial_hypothesis: String(item.commercial_hypothesis || '').slice(0, 500),
+        review_state: 'SALES_REVIEW',
+        duplicate_key: [doc.url, quote.toLowerCase()].join('|').slice(0, 400),
+      });
+    }
+    return accepted;
+  } catch (error) {
+    console.error('[MI] Verified source scan failed:', error.message);
     return [];
   }
 }
