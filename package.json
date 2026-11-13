@@ -1,0 +1,7 @@
+{
+  "name": "feigin-market-intelligence-worker",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node runtime/node.mjs", "test": "node --test worker.test.mjs" },
+  "engines": { "node": ">=22" }
+}
